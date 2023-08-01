@@ -21,57 +21,128 @@ DEBOUNCE milliseconds have elapsed since the last change.
 #include "timer.h"
 #include <stdlib.h>
 
+#ifdef PROTOCOL_CHIBIOS
+#    if CH_CFG_USE_MEMCORE == FALSE
+#        error ChibiOS is configured without a memory allocator. Your keyboard may have set `#define CH_CFG_USE_MEMCORE FALSE`, which is incompatible with this debounce algorithm.
+#    endif
+#endif
+
 #ifndef DEBOUNCE
 #    define DEBOUNCE 5
 #endif
 
-static uint16_t last_time;
-// [row] milliseconds until key's state is considered debounced.
-static uint8_t* countdowns;
-// [row]
-static matrix_row_t* last_raw;
+// Maximum debounce: 255ms
+#if DEBOUNCE > UINT8_MAX
+#    undef DEBOUNCE
+#    define DEBOUNCE UINT8_MAX
+#endif
 
+typedef uint8_t debounce_counter_t;
+
+#if DEBOUNCE > 0
+
+#    define DEBOUNCE_ELAPSED 0
+
+static debounce_counter_t *debounce_counters;
+
+static matrix_row_t *last_raw;
+static fast_timer_t  last_time;
+static bool          counters_need_update;
+static bool          cooked_changed;
+
+static void update_debounce_counters_and_transfer_if_expired(matrix_row_t raw[], matrix_row_t cooked[], uint8_t num_rows, uint8_t elapsed_time);
+static void start_debounce_counters(matrix_row_t raw[], matrix_row_t cooked[], uint8_t num_rows);
+
+// we use num_rows rather than MATRIX_ROWS to support split keyboards
 void debounce_init(uint8_t num_rows) {
-    countdowns = (uint8_t*)calloc(num_rows, sizeof(uint8_t));
-    last_raw   = (matrix_row_t*)calloc(num_rows, sizeof(matrix_row_t));
+    debounce_counters = (debounce_counter_t *)malloc(num_rows * sizeof(debounce_counter_t));
+    last_raw          = (matrix_row_t *)calloc(num_rows, sizeof(debounce_counter_t));
 
-    last_time = timer_read();
+    debounce_counter_t *debounce_pointer = debounce_counters;
+    for (uint8_t row = 0; row < num_rows; row++, debounce_pointer++) {
+        *debounce_pointer = DEBOUNCE_ELAPSED;
+    }
 }
 
 void debounce_free(void) {
-    free(countdowns);
-    countdowns = NULL;
+    free(debounce_counters);
+    debounce_counters = NULL;
     free(last_raw);
     last_raw = NULL;
 }
 
 bool debounce(matrix_row_t raw[], matrix_row_t cooked[], uint8_t num_rows, bool changed) {
-    uint16_t now           = timer_read();
-    uint16_t elapsed16     = TIMER_DIFF_16(now, last_time);
-    last_time              = now;
-    uint8_t elapsed        = (elapsed16 > 255) ? 255 : elapsed16;
-    bool    cooked_changed = false;
+    bool updated_last = false;
+    cooked_changed    = false;
 
-    uint8_t* countdown = countdowns;
+    if (counters_need_update) {
+        fast_timer_t now          = timer_read_fast();
+        fast_timer_t elapsed_time = TIMER_DIFF_FAST(now, last_time);
 
-    for (uint8_t row = 0; row < num_rows; ++row, ++countdown) {
-        matrix_row_t raw_row = raw[row];
-
-        if (raw_row != last_raw[row]) {
-            *countdown    = DEBOUNCE;
-            last_raw[row] = raw_row;
-        } else if (*countdown > elapsed) {
-            *countdown -= elapsed;
-        } else if (*countdown) {
-            cooked_changed |= cooked[row] ^ raw_row;
-            cooked[row] = raw_row;
-            *countdown  = 0;
+        last_time    = now;
+        updated_last = true;
+        if (elapsed_time > UINT8_MAX) {
+            elapsed_time = UINT8_MAX;
         }
+
+        if (elapsed_time > 0) {
+            update_debounce_counters_and_transfer_if_expired(raw, cooked, num_rows, elapsed_time);
+        }
+    }
+
+    if (changed) {
+        if (!updated_last) {
+            last_time = timer_read_fast();
+        }
+        start_debounce_counters(raw, cooked, num_rows);
     }
 
     return cooked_changed;
 }
 
-bool debounce_active(void) {
-    return true;
+static void update_debounce_counters_and_transfer_if_expired(matrix_row_t raw[], matrix_row_t cooked[], uint8_t num_rows, uint8_t elapsed_time) {
+    counters_need_update = false;
+
+    debounce_counter_t *debounce_pointer = debounce_counters;
+    for (uint8_t row = 0; row < num_rows; row++, debounce_pointer++) {
+        debounce_counter_t debounce_counter = *debounce_pointer;
+        if (debounce_counter != DEBOUNCE_ELAPSED) {
+            if (debounce_counter <= elapsed_time) {
+                *debounce_pointer    = DEBOUNCE_ELAPSED;
+                matrix_row_t raw_row = raw[row];
+                if (last_raw[row] == raw_row) {
+                    if (cooked[row] != raw_row) {
+                        cooked[row]    = raw_row;
+                        cooked_changed = true;
+                    }
+                }
+            } else {
+                *debounce_pointer    = debounce_counter - elapsed_time;
+                counters_need_update = true;
+            }
+        }
+    }
 }
+
+static void start_debounce_counters(matrix_row_t raw[], matrix_row_t cooked[], uint8_t num_rows) {
+    debounce_counter_t *debounce_pointer = debounce_counters;
+    for (uint8_t row = 0; row < num_rows; row++, debounce_pointer++) {
+        matrix_row_t raw_row = raw[row];
+        if (last_raw[row] != raw_row) {
+            *debounce_pointer    = DEBOUNCE;
+            last_raw[row]        = raw_row;
+            counters_need_update = true;
+        } else if (cooked[row] != raw_row) {
+            if (*debounce_pointer == DEBOUNCE_ELAPSED) {
+                *debounce_pointer    = DEBOUNCE;
+                counters_need_update = true;
+            }
+        } else {
+            *debounce_pointer = DEBOUNCE_ELAPSED;
+        }
+    }
+}
+
+#else
+#    include "none.c"
+#endif
