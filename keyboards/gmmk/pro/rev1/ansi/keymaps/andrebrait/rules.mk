@@ -28,3 +28,6 @@ ENCODER_MAP_ENABLE = yes
 
 # Enables VIA
 VIA_ENABLE = yes
+
+# Enables OS detection
+OS_DETECTION_ENABLE = yes

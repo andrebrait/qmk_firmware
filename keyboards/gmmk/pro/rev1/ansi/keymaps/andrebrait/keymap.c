@@ -27,7 +27,7 @@ enum custom_keycodes {
 #define KC_FLXP LWIN(KC_E)   // Open File Explorer
 #define DF_WINB DF(WIN_BASE) // Switch to WIN_BASE layer
 #define MO_WINF MO(WIN_FN)   // Toggle to WIN_FN layer
-#define DF_MACB DF(MAC_BASE) // Switch to MAX_BASE layer
+#define DF_MACB DF(MAC_BASE) // Switch to MAC_BASE layer
 #define MO_MACF MO(MAC_FN)   // Toggle to MAC_FN layer
 
 // clang-format off
@@ -302,6 +302,43 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
     return true;
 }
 
+#ifdef OS_DETECTION_ENABLE
+
+/* Marks that the os detection code was already executed */
+static bool os_detection_pending = true;
+
+/*
+Automatically switch layers when changing OSes
+*/
+bool process_detected_host_os_user(os_variant_t os) {
+    uint8_t new_layer;
+    switch (os) {
+        case OS_LINUX:
+        case OS_WINDOWS:
+            new_layer = WIN_BASE;
+            break;
+        case OS_MACOS:
+        case OS_IOS:
+            new_layer = MAC_BASE;
+            break;
+        default:
+            new_layer = layer_state_is(MAC_BASE) ? MAC_BASE : WIN_BASE;
+            break;
+    }
+
+    os_detection_pending = false;
+    if (layer_state_is(new_layer)) {
+        /* Set the default layout (no need for EEPROM), let the default layer change callback handle the rest */
+        default_layer_set(new_layer);
+    } else {
+        /* Set the default layout on the EEPROM, let the default layer change callback handle the rest */
+        set_single_persistent_default_layer(new_layer);
+    }
+
+    return true;
+}
+#endif
+
 static void start_delayed_press(fast_timer_t delay, uint16_t keycode) {
     delayed_press_delay        = delay;
     delayed_press_keycode      = keycode;
@@ -341,6 +378,12 @@ Effects when switching layers
 static uint8_t previous_layer = UINT8_MAX;
 
 layer_state_t default_layer_state_set_user(layer_state_t state) {
+#    ifdef OS_DETECTION_ENABLE
+    // OS detection will change the layer later
+    if (os_detection_pending) {
+        return state;
+    }
+#    endif
     uint8_t current_layer = get_highest_layer(state);
     if (previous_layer != current_layer) {
         // For some reason, setting the default layer alone doesn't change it fully
